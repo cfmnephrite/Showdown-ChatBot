@@ -24,6 +24,7 @@ const Path = require('path');
 const Url = require('url');
 const Http = require('http');
 const Https = require('https');
+const WebSocketServer = require('websocket').server;
 const FileSystem = require('fs');
 const QueryString = require('querystring');
 const Crypto = require('crypto');
@@ -44,10 +45,13 @@ const PageMaker = require(Path.resolve(__dirname, 'html-maker.js'));
  * @returns {String} Encrypted text
  */
 function encrypt(text, algorithm, password) {
-	let cipher = Crypto.createCipher(algorithm, password);
+	const iv = Buffer.from(Crypto.randomBytes(16));
+	const hash = Crypto.createHash('sha256');
+	hash.update(password);
+	let cipher = Crypto.createCipheriv(algorithm, hash.digest(), iv);
 	let crypted = cipher.update(text, 'utf8', 'hex');
 	crypted += cipher.final('hex');
-	return crypted;
+	return iv.toString("hex") + ":" + crypted;
 }
 
 /**
@@ -58,10 +62,21 @@ function encrypt(text, algorithm, password) {
  * @returns {String} Decrypted text
  */
 function decrypt(text, algorithm, password) {
-	let decipher = Crypto.createDecipher(algorithm, password);
-	let data = decipher.update(text, 'hex', 'utf8');
-	data += decipher.final('utf8');
-	return data;
+	if (text.indexOf(":") === -1) {
+		let decipher = Crypto.createDecipher(algorithm, password);
+		let data = decipher.update(text, 'hex', 'utf8');
+		data += decipher.final('utf8');
+		return data;
+	} else {
+		const parts = text.split(":");
+		const iv = Buffer.from(parts[0], 'hex');
+		const hash = Crypto.createHash('sha256');
+		hash.update(password);
+		let decipher = Crypto.createDecipheriv(algorithm, hash.digest(), iv);
+		let data = decipher.update(parts[1], 'hex', 'utf8');
+		data += decipher.final('utf8');
+		return data;
+	}
 }
 
 /**
@@ -85,6 +100,39 @@ class Server {
 			this.app.log("[SERVER] HTTP ERROR - " + error.code + ":" + error.message);
 		}.bind(this));
 
+		/* WS */
+		this.websoketHandlers = [];
+		this.ws = new WebSocketServer({
+			httpServer: this.http, autoAcceptConnections: false, maxReceivedFrameSize: 10 * 1024,
+			maxReceivedMessageSize: 10 * 1024
+		});
+		this.ws.on('request', function (request) {
+			const req = request.httpRequest;
+			const ip = this.getIP(req);
+			if (ip) {
+				if (this.monitor.isLocked(ip)) {
+					req.connection.destroy();
+					return;
+				}
+				this.monitor.count(ip);
+			}
+			try {
+				const ws = request.accept();
+				for (let handler of this.websoketHandlers) {
+					try {
+						if (handler(ws, req)) {
+							return; // Handled
+						}
+					} catch (err) {
+						this.app.reportCrash(err);
+					}
+				}
+				ws.close();
+			} catch (ex) {
+				req.connection.destroy();
+			}
+		}.bind(this));
+
 		/* Https */
 		this.https = null;
 		this.httpsOptions = {};
@@ -103,14 +151,47 @@ class Server {
 					bindaddress: config.bindaddress,
 				};
 				try {
-					this.https = new Https.Server({key: FileSystem.readFileSync(sslkey),
-						cert: FileSystem.readFileSync(sslcert)}, this.requestHandler.bind(this));
+					this.https = new Https.Server({
+						key: FileSystem.readFileSync(sslkey),
+						cert: FileSystem.readFileSync(sslcert)
+					}, this.requestHandler.bind(this));
 				} catch (err) {
 					console.log('Could not create a ssl server. Missing key and certificate.');
 				}
 				if (this.https) {
 					this.https.on('error', function (error) {
 						this.app.log("[SERVER] HTTPS ERROR - " + error.code + ":" + error.message);
+					}.bind(this));
+
+					this.wss = new WebSocketServer({
+						httpServer: this.https, autoAcceptConnections: false, maxReceivedFrameSize: 10 * 1024,
+						maxReceivedMessageSize: 10 * 1024
+					});
+					this.wss.on('request', function (request) {
+						const req = request.httpRequest;
+						const ip = this.getIP(req);
+						if (ip) {
+							if (this.monitor.isLocked(ip)) {
+								req.connection.destroy();
+								return;
+							}
+							this.monitor.count(ip);
+						}
+						try {
+							const ws = request.accept();
+							for (let handler of this.websoketHandlers) {
+								try {
+									if (handler(ws, req)) {
+										return; // Handled
+									}
+								} catch (err) {
+									this.app.reportCrash(err);
+								}
+							}
+							ws.close();
+						} catch (ex) {
+							req.connection.destroy();
+						}
 					}.bind(this));
 				}
 			} else {
@@ -127,7 +208,7 @@ class Server {
 			this.app.log('[SERVER - ABUSE] [UNLOCK: ' + user + ']');
 		}.bind(this));
 		this.permissions = {
-			root: {desc: "Full access permission"},
+			root: { desc: "Full access permission" },
 		};
 
 		/* Password abuse monitor */
@@ -146,7 +227,7 @@ class Server {
 			this.privatekey = Text.randomToken(20);
 			app.dam.setFileContent('users.key', this.privatekey);
 		}
-		this.userdb = app.dam.getDataBase('users.crypto', {crypto: true, key: this.privatekey});
+		this.userdb = app.dam.getDataBase('users.crypto', { crypto: true, key: this.privatekey });
 		this.users = this.userdb.data;
 		if (Object.keys(this.users).length === 0) {
 			console.log('Users Database empty. Creating initial admin account');
@@ -155,7 +236,7 @@ class Server {
 				password: 'admin',
 				name: 'Admin',
 				group: 'Administrator',
-				permissions: {root: true},
+				permissions: { root: true },
 			};
 		}
 		if (app.env && app.env.config && app.env.config.Static_Admin_Account) {
@@ -166,7 +247,7 @@ class Server {
 					password: app.env.config.Static_Admin_Account_Password,
 					name: app.env.config.Static_Admin_Account,
 					group: 'Administrator',
-					permissions: {root: true},
+					permissions: { root: true },
 				};
 			}
 		}
@@ -194,7 +275,7 @@ class Server {
 	 * @param {String} desc - Permission description
 	 */
 	setPermission(id, desc) {
-		this.permissions[id] = {desc: desc};
+		this.permissions[id] = { desc: desc };
 	}
 
 	/**
@@ -214,7 +295,7 @@ class Server {
 	 */
 	setMenuOption(id, name, url, permission, level) {
 		if (level === undefined) level = -10;
-		this.menu[id] = {name: name, url: url, permission: permission, level: level};
+		this.menu[id] = { name: name, url: url, permission: permission, level: level };
 	}
 
 	/**
@@ -255,7 +336,7 @@ class Server {
 					level = this.app.config.menuOrder[i];
 				}
 				if (!menu[level]) menu[level] = [];
-				menu[level].push({name: this.menu[i].name, url: this.menu[i].url, selected: (selected === i)});
+				menu[level].push({ name: this.menu[i].name, url: this.menu[i].url, selected: (selected === i) });
 			}
 		}
 		let ret = [];
@@ -263,7 +344,7 @@ class Server {
 			menu[level] = menu[level].sort((a, b) => {
 				return a.name.localeCompare(b.name);
 			});
-			ret.push({level: parseInt(level), menu: menu[level]});
+			ret.push({ level: parseInt(level), menu: menu[level] });
 		}
 		ret = ret.sort((a, b) => {
 			if (a.level >= b.level) {
@@ -296,9 +377,14 @@ class Server {
 	 * @returns {String} token
 	 */
 	makeToken(userid) {
+		const ENC = {
+			'+': '-',
+			'/': '_',
+			'=': '.'
+		};
 		let token;
 		do {
-			token = Text.randomToken(12);
+			token = Crypto.randomBytes(32).toString("base64").replace(/[+/=]/g, m => ENC[m]);
 		} while (this.tokens[token]);
 		this.tokens[token] = {
 			date: Date.now(),
@@ -313,7 +399,8 @@ class Server {
 	 * @param {RequestContext} context
 	 */
 	applyLogin(context) {
-		let token = context.cookies['usertoken'];
+		//console.log(JSON.stringify(context.request.headers));
+		let token = ((context.request.method + "").toUpperCase() === "GET") ? context.cookies['usertoken'] : (context.request.headers["x-csrf-token"] || context.post["x-csrf-token"]);
 		let user = context.post.user;
 		let pass = context.post.password;
 		this.sweepTokens();
@@ -391,6 +478,36 @@ class Server {
 	}
 
 	/**
+	 * Resolves an absolute URL to the control panel
+	 * @param {String} path
+	 */
+	getControlPanelLink(path) {
+		if (!this.app.config.server.url) {
+			return "#";
+		}
+		try {
+			let url = new Url.URL(path, this.app.config.server.url);
+			return url.toString();
+		} catch (ex) {
+			this.app.reportCrash(ex);
+			return "#";
+		}
+	}
+
+	getPokeSimLink(path) {
+		if (!this.app.config.server.url) {
+			return "#";
+		}
+		try {
+			let url = new Url.URL("/", this.app.config.server.url);
+			return "http://" + url.hostname + "-" + (url.port || (url.protocol === "https:" ? 443 : 80)) + ".psim.us" + (path || "/");
+		} catch (ex) {
+			this.app.reportCrash(ex);
+			return "#";
+		}
+	}
+
+	/**
 	 * Handler for server requests
 	 * @param {ClientRequest} request
 	 * @param {ServerResponse} response
@@ -421,20 +538,29 @@ class Server {
 	 * @param {RequestContext} context
 	 */
 	serve(context) {
-		if (context.url.path in {'/favicon.ico': 1, 'favicon.ico': 1}) {
+		if (context.url.path in { '/favicon.ico': 1, 'favicon.ico': 1 }) {
 			/* Favicon.ico */
 			context.endWithStaticFile(Path.resolve(__dirname, '../../favicon.ico'));
+		} else if (context.url.path.startsWith("/showdown/info?") || context.url.path.startsWith("/info?")) {
+			context.headers["Access-Control-Allow-Origin"] = context.request.headers['Origin'] || context.request.headers['origin'] || "*";
+			context.headers["Access-Control-Allow-Credentials"] = "true";
+			context.endWithJSON({
+				cookie_needed: false,
+				entropy: 1858301765,
+				origins: ["*:*"],
+				websocket: true,
+			});
 		} else if (!context.url.path || context.url.path === '/') {
 			/* Main page */
 			context.setMenu(this.getMenu(context));
 			if (this.app.config.mainhtml) {
-				context.endWithWebPage(this.app.config.mainhtml, {title: "Showdown ChatBot - Control Panel"});
+				context.endWithWebPage(this.app.config.mainhtml, { title: "Showdown ChatBot - Control Panel" });
 			} else {
 				FileSystem.readFile(Path.resolve(__dirname, 'main.html'), (error, data) => {
 					if (error) {
 						context.endWithError(500, 'Internal Server Error', 'Error: ' + error.code + " (" + error.message + ")");
 					} else {
-						context.endWithWebPage(data.toString(), {title: "Showdown ChatBot - Control Panel"});
+						context.endWithWebPage(data.toString(), { title: "Showdown ChatBot - Control Panel" });
 					}
 				});
 			}
@@ -547,7 +673,7 @@ class RequestContext {
 		this.url = Url.parse(request.url);
 		this.menu = [];
 		this.ip = (ip || request.connection.remoteAddress);
-		this.headers = {'X-XSS-Protection': 0};
+		this.headers = { 'X-XSS-Protection': 0 };
 		this.invalidLogin = false;
 		this.get = {};
 		this.post = {};
@@ -585,10 +711,8 @@ class RequestContext {
 			this.request.on('end', function () {
 				let busboy = null;
 				try {
-					busboy = new Busboy({headers: this.request.headers});
-				} catch (err) {
-					this.server.app.reportCrash(err);
-				}
+					busboy = new Busboy({ headers: this.request.headers });
+				} catch (err) { }
 				if (busboy) {
 					let files = this.files = {};
 					let post = this.post = {};
@@ -684,6 +808,12 @@ class RequestContext {
 		this.response.end(text);
 	}
 
+	endWithJSON(json, code) {
+		this.headers['Content-Type'] = 'application/json; charset=utf-8';
+		this.response.writeHead(code || 200, this.headers);
+		this.response.end(JSON.stringify(json));
+	}
+
 	/**
 	 * Sends a pre-formated html page to the client
 	 * @param {String} body
@@ -717,7 +847,7 @@ class RequestContext {
 		let html = '';
 		html += '<h1>Error 404</h1>';
 		html += '<p>The page you requested was not found!</p>';
-		this.endWithWebPage(html, {title: "Page not found"}, 404);
+		this.endWithWebPage(html, { title: "Page not found" }, 404);
 	}
 
 	/**
@@ -727,7 +857,7 @@ class RequestContext {
 		let html = '';
 		html += '<h1>Error 403</h1>';
 		html += '<p>You have not permission to access this feature!</p>';
-		this.endWithWebPage(html, {title: "Forbidden"}, 403);
+		this.endWithWebPage(html, { title: "Forbidden" }, 403);
 	}
 
 	/**

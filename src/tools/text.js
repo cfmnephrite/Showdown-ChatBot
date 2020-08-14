@@ -55,7 +55,7 @@ exports.toFormatStandard = function (str) {
 	if ((/^gen[0-9]+.*/i).test(str)) {
 		return str;
 	} else {
-		return "gen7" + str;
+		return "gen8" + str;
 	}
 };
 
@@ -77,6 +77,12 @@ exports.trim = function (str) {
 exports.escapeHTML = function (str) {
 	if (!str) return '';
 	return ('' + str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;').replace(/\//g, '&#x2f;');
+};
+
+
+exports.removeDoubleQuotes = function (str) {
+	if (!str) return '';
+	return ('' + str).replace(/"/g, '');
 };
 
 /**
@@ -164,6 +170,15 @@ exports.randomId = function (length) {
  */
 exports.randomToken = function (length) {
 	const chars = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_';
+	let str = '';
+	for (let i = 0; i < length; i++) {
+		str += chars.charAt(~~(Math.random() * chars.length));
+	}
+	return str;
+};
+
+exports.randomNumber = function (length) {
+	const chars = '0123456789';
 	let str = '';
 	for (let i = 0; i < length; i++) {
 		str += chars.charAt(~~(Math.random() * chars.length));

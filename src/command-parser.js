@@ -63,6 +63,7 @@ class CommandParser {
 		if (!this.data.helpmsg) this.data.helpmsg = ""; /* Help Message */
 		if (!this.data.antispam) this.data.antispam = false; /* Anti-Spam System */
 		if (!this.data.antirepeat) this.data.antirepeat = false; /* Anti-Repeat System */
+		if (!this.data.pmTokens || !(this.data.pmTokens instanceof Array)) this.data.pmTokens = []; /* Command Aliases */
 
 		/* Dynamic Commands */
 		if (!this.data.dyncmds) this.data.dyncmds = {};
@@ -374,7 +375,13 @@ class CommandParser {
 		}
 
 		/* Command Token */
-		let tokens = this.app.config.parser.tokens;
+		let tokens = (this.app.config.parser.tokens || []).slice();
+
+		if (room === null) {
+			// PM specific tokens
+			tokens = tokens.concat(this.data.pmTokens || []);
+		}
+
 		let token = null;
 		for (let i = 0; i < tokens.length; i++) {
 			if (msg.indexOf(tokens[i]) === 0) {
@@ -725,7 +732,9 @@ class CommandContext {
 	wallReply(msg) {
 		let roomData = this.parser.bot.rooms[this.room];
 		let botid = Text.toId(this.parser.bot.getBotNick());
-		if (roomData && roomData.users[botid] && this.parser.equalOrHigherGroup({group: roomData.users[botid]}, 'driver')) {
+		if (this.isPM) {
+			return this.sendPM(this.byIdent.id, msg);
+		} else if (roomData && roomData.users[botid] && this.parser.equalOrHigherGroup({group: roomData.users[botid]}, 'driver')) {
 			if (msg instanceof Array) {
 				for (let i = 0; i < msg.length; i++) {
 					msg[i] = "/announce " + msg[i];
@@ -832,6 +841,10 @@ class CommandContext {
 		}
 		txt += Chat.italics(args);
 		return txt;
+	}
+
+	deprecated(alt) {
+		return (this.parser.app.multilang.mlt(Lang_File, this.lang, 'deprecated') + "").replace("#CMD", alt);
 	}
 
 	/**

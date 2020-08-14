@@ -5,12 +5,20 @@
   "commands": [
     "commands.js"
   ],
+  "handlers": [
+    "server-handler.js"
+  ],
   "permissions": {
-	"timer": {"group": "driver"}
+    "timer": {
+      "group": "driver"
+    },
+    "repeat": {
+      "group": "driver"
+    }
   },
   "langfiles": [
     "./commands.translations",
-	"./timers.translations"
+    "./timers.translations"
   ],
   "description": "Timeout commands for chat rooms"
 }

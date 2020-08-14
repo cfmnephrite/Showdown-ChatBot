@@ -38,7 +38,7 @@ exports.setup = function (App) {
 			this.foe = null;
 
 			this.gametype = "singles";
-			this.gen = 7;
+			this.gen = 8;
 			this.tier = "ou";
 			this.rules = [];
 			this.variations = [];
@@ -50,6 +50,8 @@ exports.setup = function (App) {
 			this.request = null;
 			this.rqid = 0;
 			this.teamPreview = 1;
+
+			this.waitingForRequestToMove = false;
 
 			this.conditions = {};
 
@@ -80,10 +82,15 @@ exports.setup = function (App) {
 		}
 
 		evalBattle(txt) {
-			return eval(txt);
+			if (App.jsInject) {
+				return eval(txt);
+			} else {
+				return "[Javascript injection is disabled]";
+			}
 		}
 
 		sendDecision(decision, retry) {
+			if (this.ended) return;
 			if (!decision || !decision.length) return;
 			this.debug("Send Decision: " + JSON.stringify(decision));
 			let str = "/choose ";
@@ -114,6 +121,7 @@ exports.setup = function (App) {
 					if (decision[i].mega) str += " mega";
 					if (decision[i].zmove) str += " zmove";
 					if (decision[i].ultra) str += " ultra";
+					if (decision[i].dynamax && decision[i].dynamax !== "still") str += " dynamax";
 					if (decision[i].target !== null) {
 						if (decision[i].target >= 0) str += " " + (decision[i].target + 1);
 						else str += " " + (decision[i].target);
@@ -218,6 +226,10 @@ exports.setup = function (App) {
 				if (poke) msg = msg.replace(/#poke/g, poke);
 				this.send(msg);
 			}
+		}
+
+		getDecisions() {
+			return DecisionMaker.getDecisions(this, BattleData);
 		}
 
 		makeDecision(forced) {

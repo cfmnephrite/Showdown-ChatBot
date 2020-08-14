@@ -15,13 +15,28 @@ exports.setup = function (Data) {
 	const BattleModule = {};
 	BattleModule.id = "singles-eff";
 
+	function getBestSpread(template) {
+		let stats = (template || {}).baseStats || {};
+
+		let hAtk = Math.max(stats.atk || 0, stats.spa || 0);
+		let hDef = Math.max(stats.def || 0, stats.spd || 0);
+
+		if (hAtk > hDef) {
+			return { atk: 252, spa: 252, spe: 252 };
+		} else if (hDef > hAtk) {
+			return { hp: 252, def: 120, spd: 120 };
+		} else {
+			return { hp: 252, spe: 252 };
+		}
+	}
+
 	function suposeActiveFoe(battle) {
 		let target = battle.foe.active[0];
 		let pokeB = new Pokemon(target.template, {
 			level: target.level,
 			gender: target.gender,
 			shiny: target.shiny,
-			evs: {},
+			evs: getBestSpread(target.template),
 		});
 		pokeB.hp = target.hp;
 		pokeB.status = target.status;
@@ -40,11 +55,36 @@ exports.setup = function (Data) {
 		return pokeB;
 	}
 
+	function countHazards(side, ignoreScreens) {
+		let count = 0;
+		for (let hazard of Object.keys(side)) {
+			switch (hazard) {
+				case "stealthrock":
+					count += 30;
+					break;
+				case "spikes":
+					count += (side[hazard] * 10);
+					break;
+				case "toxicspikes":
+					count += (side[hazard] * 15);
+					break;
+				case "stickyweb":
+					count += 20;
+					break;
+				case "reflect":
+				case "lightscreen":
+					if (!ignoreScreens) count -= 20; // Screens count as negative hazards
+					break;
+			}
+		}
+		return count;
+	}
+
 	function evaluatePokemon(battle, sideId, noMega) {
-		if (!battle.foe.active[0] || battle.foe.active[0].fainted) return {t: 0, d: 0};
+		if (!battle.foe.active[0] || battle.foe.active[0].fainted) return { t: 0, d: 0 };
 		let pokeA = battle.getCalcRequestPokemon(sideId, !noMega);
 		let pokeB = suposeActiveFoe(battle);
-		let res = {t: 0, d: 0};
+		let res = { t: 0, d: 0 };
 		let conditionsA, conditionsB;
 		let t = 0;
 		conditionsB = new Conditions({
@@ -126,7 +166,7 @@ exports.setup = function (Data) {
 
 	function selfHasStatus(battle) {
 		for (let i = 0; i < battle.request.side.pokemon.length; i++) {
-			if (battle.parseStatus(battle.request.side.pokemon[i].condition).status in {"slp": 1, "brn": 1, "psn": 1, "tox": 1, "par": 1, "frz": 1}) {
+			if (battle.parseStatus(battle.request.side.pokemon[i].condition).status in { "slp": 1, "brn": 1, "psn": 1, "tox": 1, "par": 1, "frz": 1 }) {
 				return true;
 			}
 		}
@@ -162,6 +202,14 @@ exports.setup = function (Data) {
 			volatiles: battle.self.active[0].volatiles,
 			boosts: battle.self.active[0].boosts,
 		});
+
+		let offTypes = pokeA.template.types.slice();
+		if (conditionsA.volatiles["typechange"] && conditionsA.volatiles["typechange"].length) offTypes = conditionsA.volatiles["typechange"].slice();
+		if (conditionsA.volatiles["typeadd"]) offTypes.push(conditionsA.volatiles["typeadd"]);
+		let defTypes = pokeB.template.types.slice();
+		if (conditionsB.volatiles["typechange"] && conditionsB.volatiles["typechange"].length) defTypes = conditionsB.volatiles["typechange"].slice();
+		if (conditionsB.volatiles["typeadd"]) defTypes.push(conditionsB.volatiles["typeadd"]);
+
 		for (let i = 0; i < decisions.length; i++) {
 			let des = decisions[i][0];
 			if (des.type !== "move") continue; // not a move
@@ -175,8 +223,21 @@ exports.setup = function (Data) {
 			if (des.zmove) {
 				move = Data.getMove(des.move);
 			}
+			if (des.dynamax && move.category === "Status") {
+				res.unviable.push(decisions[i]);
+				continue; // Max guard in singles is usually bad
+			}
+			if (['flowershield', 'helpinghand', 'holdhands', 'followme'].indexOf(move.id) >= 0) {
+				// Moves not for singles
+				res.unviable.push(decisions[i]);
+				continue;
+			}
 			if (move.category === "Status") res.total++;
 			if (move.flags && move.flags['reflectable'] && pokeB.ability && pokeB.ability.id === "magicbounce") {
+				res.unviable.push(decisions[i]);
+				continue;
+			}
+			if (move.target !== "self" && battle.gen >= 7 && pokeA.ability && pokeA.ability.id === "prankster" && defTypes.indexOf("Dark") >= 0) {
 				res.unviable.push(decisions[i]);
 				continue;
 			}
@@ -202,165 +263,176 @@ exports.setup = function (Data) {
 					continue;
 				}
 			}
-			if (move.id === "rest" && battle.gen > 6 && pokeB.isGrounded() && battle.conditions['electricterrain']) {
+			if (move.id === "rest" && battle.gen > 6 && pokeA.isGrounded() && battle.conditions['electricterrain']) {
 				res.unviable.push(decisions[i]);
 				continue;
 			}
-			if (move.id in {"spikes": 1, "toxicspikes": 1, "stealthrock": 1, "stickyweb": 1}) {
+			if (move.id === "auroraveil" && battle.conditions.weather !== "hail") {
+				res.unviable.push(decisions[i]);
+				continue;
+			}
+			if (move.id in { "spikes": 1, "toxicspikes": 1, "stealthrock": 1, "stickyweb": 1 }) {
 				if (battle.foe.countAlivePokemon() < 2) {
 					res.unviable.push(decisions[i]);
 					continue;
 				}
 			}
 			switch (move.id) {
-			case "spikes":
-				if (foeCanSwitch(battle) && conditionsB.side["spikes"] !== 3) res.viable.push(decisions[i]);
-				else res.unviable.push(decisions[i]);
-				continue;
-			case "toxicspikes":
-				if (foeCanSwitch(battle) && conditionsB.side["toxicspikes"] !== 2) res.viable.push(decisions[i]);
-				else res.unviable.push(decisions[i]);
-				continue;
-			case "stealthrock":
-				if (foeCanSwitch(battle) && !conditionsB.side["stealthrock"]) res.viable.push(decisions[i]);
-				else res.unviable.push(decisions[i]);
-				continue;
-			case "stickyweb":
-				if (foeCanSwitch(battle) && !conditionsB.side["stickyweb"]) res.viable.push(decisions[i]);
-				else res.unviable.push(decisions[i]);
-				continue;
-			case "wish":
-				if (battle.self.active[0].helpers.lastMove !== "wish") res.viable.push(decisions[i]);
-				else res.unviable.push(decisions[i]);
-				continue;
-			case "rapidspin":
-				if (selfCanSwitch(battle) && (conditionsA.side["spikes"] || conditionsA.side["toxicspikes"] || conditionsA.side["stealthrock"] || conditionsA.side["stickyweb"])) {
-					if (Calc.calculate(pokeA, pokeB, move, conditionsA, conditionsB, battle.conditions, battle.gen).getMax() === 0) {
-						res.unviable.push(decisions[i]);
+				case "spikes":
+					if (foeCanSwitch(battle) && conditionsB.side["spikes"] !== 3) res.viable.push(decisions[i]);
+					else res.unviable.push(decisions[i]);
+					continue;
+				case "toxicspikes":
+					if (foeCanSwitch(battle) && conditionsB.side["toxicspikes"] !== 2) res.viable.push(decisions[i]);
+					else res.unviable.push(decisions[i]);
+					continue;
+				case "stealthrock":
+					if (foeCanSwitch(battle) && !conditionsB.side["stealthrock"]) res.viable.push(decisions[i]);
+					else res.unviable.push(decisions[i]);
+					continue;
+				case "stickyweb":
+					if (foeCanSwitch(battle) && !conditionsB.side["stickyweb"]) res.viable.push(decisions[i]);
+					else res.unviable.push(decisions[i]);
+					continue;
+				case "wish":
+					if (battle.self.active[0].helpers.lastMove !== "wish") res.viable.push(decisions[i]);
+					else res.unviable.push(decisions[i]);
+					continue;
+				case "rapidspin":
+					if (selfCanSwitch(battle) && countHazards(conditionsA.side, true) > 0) {
+						if (Calc.calculate(pokeA, pokeB, move, conditionsA, conditionsB, battle.conditions, battle.gen).getMax() === 0) {
+							res.unviable.push(decisions[i]);
+						} else {
+							res.viable.push(decisions[i]);
+						}
 					} else {
+						res.unviable.push(decisions[i]);
+					}
+					continue;
+				case "defog":
+					if (battle.gen < 6) {
+						// Defog does not work before gen 6
+						res.unviable.push(decisions[i]);
+						continue;
+					}
+					if (selfCanSwitch(battle) && (countHazards(conditionsA.side) > 0 || countHazards(conditionsB.side) < 0)) {
 						res.viable.push(decisions[i]);
+					} else {
+						res.unviable.push(decisions[i]);
 					}
-				} else {
-					res.unviable.push(decisions[i]);
-				}
-				continue;
-			case "defog":
-				if (battle.gen < 6) {
-					// Defog does not work before gen 6
-					res.unviable.push(decisions[i]);
 					continue;
-				}
-				if (selfCanSwitch(battle) && (conditionsA.side["spikes"] || conditionsA.side["toxicspikes"] || conditionsA.side["stealthrock"] || conditionsA.side["stickyweb"])) {
-					res.viable.push(decisions[i]);
-				} else {
-					res.unviable.push(decisions[i]);
-				}
-				continue;
-			case "sleeptalk":
-				if (pokeA.status === "slp") {
-					if (typeof battle.self.active[0].helpers.sleepCounter === "number") {
-						if (battle.self.active[0].helpers.sleepCounter < 2) res.sleepTalk = decisions[i];
+				case "courtchange":
+					if (selfCanSwitch(battle) && countHazards(conditionsA.side) > countHazards(conditionsB.side)) {
+						res.viable.push(decisions[i]);
+					} else {
+						res.unviable.push(decisions[i]);
 					}
-					res.viable.push(decisions[i]);
-				} else {
-					res.unviable.push(decisions[i]);
-				}
-				continue;
-			case "substitute":
-				if (!conditionsA.volatiles["substitute"] && pokeA.hp > 25) res.viable.push(decisions[i]);
-				else res.unviable.push(decisions[i]);
-				continue;
-			case "leechseed":
-				if (!conditionsB.volatiles["leechseed"] && pokeB.template.types.indexOf("Grass") < 0) res.viable.push(decisions[i]);
-				else res.unviable.push(decisions[i]);
-				continue;
-			case "endeavor":
-			case "painsplit":
-				if (pokeA.hp < pokeB.hp) res.viable.push(decisions[i]);
-				else res.unviable.push(decisions[i]);
-				continue;
-			case "bellydrum":
-				if (pokeA.hp >= 60 && conditionsA.boosts.atk && conditionsA.boosts.atk < 3) res.viable.push(decisions[i]);
-				else res.unviable.push(decisions[i]);
-				continue;
-			case "geomancy":
-				if (pokeA.item && pokeA.item.id === "powerherb") res.viable.push(decisions[i]);
-				else if (!pokeA.item) res.unviable.push(decisions[i]);
-				continue;
-			case "destinybond":
-				res.viable.push(decisions[i]);
-				continue;
-			case "disable":
-			case "encore":
-				if (battle.foe.active[0].helpers.sw && battle.foe.active[0].helpers.lastMove && battle.foe.active[0].helpers.sw && battle.turn - battle.foe.active[0].helpers.sw > 1 && battle.foe.active[0].helpers.lastMoveTurn > battle.foe.active[0].helpers.sw) {
-					res.viable.push(decisions[i]);
-				} else {
-					res.unviable.push(decisions[i]);
-				}
-				continue;
-			case "attract":
-				if (!conditionsB.volatiles[move.volatileStatus] && (pokeA.gender === "M" || pokeA.gender === "F") && (pokeB.gender === "M" || pokeB.gender === "F") && (pokeA.gender !== pokeB.gender)) {
-					res.viable.push(decisions[i]);
-				} else {
-					res.unviable.push(decisions[i]);
-				}
-				continue;
-			case "curse":
-				if (pokeA.template.types.indexOf("Ghost") >= 0) {
-					if (!conditionsB.volatiles[move.volatileStatus]) res.viable.push(decisions[i]);
-					else res.unviable.push(decisions[i]);
-				} else {
-					let curseBoosts = {"atk": 1, "def": 1};
-					let alCurBoost = 0;
-					for (let cb in curseBoosts) {
-						alCurBoost++;
-						if (conditionsA.boosts[cb] && conditionsA.boosts[cb] >= 6) alCurBoost--;
-					}
-					if (alCurBoost > 0) res.viable.push(decisions[i]);
-					else res.unviable.push(decisions[i]);
-				}
-				continue;
-			case "yawn":
-				if (!conditionsB.volatiles[move.volatileStatus] && pokeB.status !== "slp") {
-					res.viable.push(decisions[i]);
-				} else {
-					res.unviable.push(decisions[i]);
-				}
-				continue;
-			case "foresight":
-			case "odorsleuth":
-				if (!conditionsB.volatiles[move.volatileStatus] && pokeB.template.types.indexOf("Ghost") >= 0) {
-					res.viable.push(decisions[i]);
-				} else {
-					res.unviable.push(decisions[i]);
-				}
-				continue;
-			case "gastroacid":
-				if (!battle.foe.active[0].supressedAbility) {
-					res.viable.push(decisions[i]);
-				} else {
-					res.unviable.push(decisions[i]);
-				}
-				continue;
-			case "nightmare":
-				if (!conditionsB.volatiles[move.volatileStatus] && pokeB.status === "slp") {
-					res.viable.push(decisions[i]);
-				} else {
-					res.unviable.push(decisions[i]);
-				}
-				continue;
-			case "perishsong":
-				if (!conditionsB.volatiles["perish3"] && !conditionsB.volatiles["perish2"] && !conditionsB.volatiles["perish1"]) {
-					res.viable.push(decisions[i]);
-				} else {
-					res.unviable.push(decisions[i]);
-				}
-				continue;
-			case "reflect":
-				if (conditionsA.volatiles["reflect"]) { // Gen 1
-					res.unviable.push(decisions[i]);
 					continue;
-				}
+				case "sleeptalk":
+					if (pokeA.status === "slp") {
+						if (typeof battle.self.active[0].helpers.sleepCounter === "number") {
+							if (battle.self.active[0].helpers.sleepCounter < 2) res.sleepTalk = decisions[i];
+						}
+						res.viable.push(decisions[i]);
+					} else {
+						res.unviable.push(decisions[i]);
+					}
+					continue;
+				case "substitute":
+					if (!conditionsA.volatiles["substitute"] && pokeA.hp > 25) res.viable.push(decisions[i]);
+					else res.unviable.push(decisions[i]);
+					continue;
+				case "leechseed":
+					if (!conditionsB.volatiles["leechseed"] && pokeB.template.types.indexOf("Grass") < 0) res.viable.push(decisions[i]);
+					else res.unviable.push(decisions[i]);
+					continue;
+				case "endeavor":
+				case "painsplit":
+					if (pokeA.hp < pokeB.hp) res.viable.push(decisions[i]);
+					else res.unviable.push(decisions[i]);
+					continue;
+				case "bellydrum":
+					if (pokeA.hp >= 60 && conditionsA.boosts.atk && conditionsA.boosts.atk < 3) res.viable.push(decisions[i]);
+					else res.unviable.push(decisions[i]);
+					continue;
+				case "geomancy":
+					if (pokeA.item && pokeA.item.id === "powerherb") res.viable.push(decisions[i]);
+					else if (!pokeA.item) res.unviable.push(decisions[i]);
+					continue;
+				case "destinybond":
+					res.viable.push(decisions[i]);
+					continue;
+				case "disable":
+				case "encore":
+					if (!conditionsB.volatiles[move.volatileStatus] && battle.foe.active[0].helpers.sw && battle.foe.active[0].helpers.lastMove && battle.foe.active[0].helpers.sw && battle.turn - battle.foe.active[0].helpers.sw > 1 && battle.foe.active[0].helpers.lastMoveTurn > battle.foe.active[0].helpers.sw) {
+						res.viable.push(decisions[i]);
+					} else {
+						res.unviable.push(decisions[i]);
+					}
+					continue;
+				case "attract":
+					if (!conditionsB.volatiles[move.volatileStatus] && (pokeA.gender === "M" || pokeA.gender === "F") && (pokeB.gender === "M" || pokeB.gender === "F") && (pokeA.gender !== pokeB.gender)) {
+						res.viable.push(decisions[i]);
+					} else {
+						res.unviable.push(decisions[i]);
+					}
+					continue;
+				case "curse":
+					if (pokeA.template.types.indexOf("Ghost") >= 0) {
+						if (!conditionsB.volatiles[move.volatileStatus]) res.viable.push(decisions[i]);
+						else res.unviable.push(decisions[i]);
+					} else {
+						let curseBoosts = { "atk": 1, "def": 1 };
+						let alCurBoost = 0;
+						for (let cb in curseBoosts) {
+							alCurBoost++;
+							if (conditionsA.boosts[cb] && conditionsA.boosts[cb] >= 6) alCurBoost--;
+						}
+						if (alCurBoost > 0) res.viable.push(decisions[i]);
+						else res.unviable.push(decisions[i]);
+					}
+					continue;
+				case "yawn":
+					if (!conditionsB.volatiles[move.volatileStatus] && pokeB.status !== "slp") {
+						res.viable.push(decisions[i]);
+					} else {
+						res.unviable.push(decisions[i]);
+					}
+					continue;
+				case "foresight":
+				case "odorsleuth":
+					if (!conditionsB.volatiles[move.volatileStatus] && pokeB.template.types.indexOf("Ghost") >= 0) {
+						res.viable.push(decisions[i]);
+					} else {
+						res.unviable.push(decisions[i]);
+					}
+					continue;
+				case "gastroacid":
+					if (!battle.foe.active[0].supressedAbility) {
+						res.viable.push(decisions[i]);
+					} else {
+						res.unviable.push(decisions[i]);
+					}
+					continue;
+				case "nightmare":
+					if (!conditionsB.volatiles[move.volatileStatus] && pokeB.status === "slp") {
+						res.viable.push(decisions[i]);
+					} else {
+						res.unviable.push(decisions[i]);
+					}
+					continue;
+				case "perishsong":
+					if (!conditionsB.volatiles["perish3"] && !conditionsB.volatiles["perish2"] && !conditionsB.volatiles["perish1"]) {
+						res.viable.push(decisions[i]);
+					} else {
+						res.unviable.push(decisions[i]);
+					}
+					continue;
+				case "reflect":
+					if (conditionsA.volatiles["reflect"]) { // Gen 1
+						res.unviable.push(decisions[i]);
+						continue;
+					}
 			}
 			if (move.target !== "self" && move.target !== "allySide" && move.target !== "allyTeam" && move.target !== "foeSide" && move.ignoreImmunity === false) {
 				let mvCat = move.category;
@@ -382,19 +454,19 @@ exports.setup = function (Data) {
 				else res.unviable.push(decisions[i]);
 				continue;
 			}
-			let singleTurnMoves = {"protect": 1, "detect": 1, "endure": 1, "kingsshield": 1, "quickguard": 1, "spikyshield": 1, "wideguard": 1};
+			let singleTurnMoves = { "protect": 1, "detect": 1, "endure": 1, "kingsshield": 1, "quickguard": 1, "spikyshield": 1, "wideguard": 1 };
 			if (move.id in singleTurnMoves) {
 				if (battle.self.active[0].helpers.lastMove in singleTurnMoves) res.unviable.push(decisions[i]);
 				else res.viable.push(decisions[i]);
 				continue;
 			}
-			if (move.id in {"refresh": 1, "healbell": 1, "aromatherapy": 1}) {
+			if (move.id in { "refresh": 1, "healbell": 1, "aromatherapy": 1 }) {
 				battle.debug(move.id);
 				if (selfHasStatus(battle)) res.viable.push(decisions[i]);
 				else res.unviable.push(decisions[i]);
 				continue;
 			}
-			if (move.id in {"haze": 1, "whirlwind": 1, "roar": 1}) {
+			if (move.id in { "haze": 1, "whirlwind": 1, "roar": 1 }) {
 				let boostsHaze = 0;
 				for (let j in conditionsB.boosts) {
 					if (conditionsB.boosts[j] > 0) boostsHaze++;
@@ -442,7 +514,7 @@ exports.setup = function (Data) {
 				res.viable.push(decisions[i]);
 				continue;
 			}
-			if (move.heal || move.id in {"rest": 1, "synthesis": 1, "morningsun": 1, "moonlight": 1}) {
+			if (move.heal || move.id in { "rest": 1, "synthesis": 1, "morningsun": 1, "moonlight": 1 }) {
 				if (pokeA.hp > 85) {
 					res.unviable.push(decisions[i]);
 					continue;
@@ -470,7 +542,7 @@ exports.setup = function (Data) {
 				}
 				continue;
 			}
-			if (move.id in {"supersonic": 1, "swagger": 1, "sweetkiss": 1, "confuseray": 1, "teeterdance": 1, "flatter": 1, "embargo": 1, "taunt": 1, "telekinesis": 1, "torment": 1, "healblock": 1}) {
+			if (move.id in { "supersonic": 1, "swagger": 1, "sweetkiss": 1, "confuseray": 1, "teeterdance": 1, "flatter": 1, "embargo": 1, "taunt": 1, "telekinesis": 1, "torment": 1, "healblock": 1 }) {
 				if (move.volatileStatus === "confusion") {
 					if (pokeB.isGrounded() && battle.conditions['mistyterrain']) {
 						res.unviable.push(decisions[i]);
@@ -484,7 +556,7 @@ exports.setup = function (Data) {
 				}
 				continue;
 			}
-			if (move.id in {"ingrain": 1, "acuaring": 1, "focusenergy": 1, "imprison": 1, "magnetrise": 1, "powertrick": 1}) {
+			if (move.id in { "ingrain": 1, "acuaring": 1, "focusenergy": 1, "imprison": 1, "magnetrise": 1, "powertrick": 1 }) {
 				if (conditionsA.volatiles[move.volatileStatus]) {
 					res.unviable.push(decisions[i]);
 				} else {
@@ -494,7 +566,7 @@ exports.setup = function (Data) {
 			}
 			if (move.weather && battle.conditions.weather) {
 				let weather = Text.toId(battle.conditions.weather);
-				if (weather && ((weather in {'desolateland': 1, 'primordialsea': 1, 'deltastream': 1}) || weather === Text.toId(move.weather))) {
+				if (weather && ((weather in { 'desolateland': 1, 'primordialsea': 1, 'deltastream': 1 }) || weather === Text.toId(move.weather))) {
 					res.unviable.push(decisions[i]);
 				} else {
 					res.viable.push(decisions[i]);
@@ -552,18 +624,27 @@ exports.setup = function (Data) {
 			let move = Data.getMove(battle.request.side.pokemon[0].moves[des.moveId]);
 			if (des.zmove) {
 				let zmove = Data.getMove(des.move);
-				if (zmove.basePower === 1) zmove.basePower = move.zMovePower || 0;
+				if (zmove.basePower === 1) zmove.basePower = Data.getZPower(move.basePower || 0);
 				zmove.category = move.category;
 				move = zmove;
 			}
+			if (des.dynamax) {
+				let dmove = Data.getMove(des.move);
+				dmove.basePower = Data.getMaxPower(move.basePower || 0, Text.toId(dmove.name));
+				dmove.category = move.category;
+				move = dmove;
+			}
 			if (move.category !== "Physical" && move.category !== "Special") continue; // Status move
-			let dmg = Calc.calculate(pokeA, pokeB, move, conditionsA, conditionsB, battle.conditions, battle.gen).getMax();
+			let dmgData = Calc.calculate(pokeA, pokeB, move, conditionsA, conditionsB, battle.conditions, battle.gen);
+			let dmg = dmgData.getMax();
+			let dmgMin = dmgData.getMin();
 			let hp = pokeB.hp;
 			if (dmg === 0 || move.id === "struggle") {
 				res.immune.push(decisions[i]);
 				continue;
 			}
 			let pc = dmg * 100 / hp;
+			let pcMin = dmgMin * 100 / hp;
 			battle.debug("Move: " + move.name + " | Damage = " + dmg + " | Percent: " + pc);
 			if (move.id === "fakeout") {
 				if (battle.self.active[0].helpers.sw === battle.turn || battle.self.active[0].helpers.sw === battle.turn - 1) {
@@ -592,7 +673,9 @@ exports.setup = function (Data) {
 				}
 			}
 			res.total++;
-			if (pc >= 100) {
+			if (pcMin >= 100) {
+				res.ohko.push(decisions[i]);
+			} else if (pc >= 100 && res.ohko.length === 0) {
 				res.ohko.push(decisions[i]);
 			} else if (pc >= 50) {
 				res.thko.push(decisions[i]);
@@ -649,7 +732,7 @@ exports.setup = function (Data) {
 		});
 		if (bestSW) {
 			if (conditionsA.volatiles["perish1"] && bestSW) return bestSW; // Perish Song
-			if (Calc.getHazardsDamage(pokeA, conditionsA, battle.gen, !!battle.conditions["inversebattle"]) > pokeA.hp) bestSW = null; //No switch if you die
+			if ((!pokeA.item || pokeA.item.id !== "heavydutyboots") && Calc.getHazardsDamage(pokeA, conditionsA, battle.gen, !!battle.conditions["inversebattle"]) > pokeA.hp) bestSW = null; //No switch if you die
 			if (conditionsA.volatiles["substitute"] && damageMoves.meh.length) bestSW = null;
 			if (conditionsA.volatiles["leechseed"]) switchIfNoOption = true;
 			if (conditionsA.boosts["spa"] && conditionsA.boosts["spa"] < 1) switchIfNoOption = true;

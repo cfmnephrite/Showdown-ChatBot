@@ -206,13 +206,39 @@ class ModeratorBot {
 		}
 	}
 
+	doHideText(room, raw) {
+		if (!this.modEnabled('hidetext', room) && !this.modEnabled('cleartext', room)) return; // Not enabled
+		if (!this.botCanModerate(room)) return;
+
+		let muteregexp = /^(.+) was muted by (.+) for 7 minutes\.(\s\(.*\))?$/g;
+		let hourmuteRegExp = /^(.+) was muted by (.+) for 1 hour\.(\s\(.*\))?$/g;
+		let banRegExp = /^(.+) was banned from (.+) by (.+)\.(\s\(.*\))?$/g;
+
+		let muteRes = muteregexp.exec(raw);
+		let hmRes = hourmuteRegExp.exec(raw);
+		let banRes = banRegExp.exec(raw);
+
+		let res = muteRes || hmRes || banRes;
+
+		if (res) {
+			let user = Text.toId(res[1]);
+			if (user) {
+				if (this.modEnabled('cleartext', room)) {
+					this.app.bot.sendTo(room, '/cleartext ' + user);
+				} else if (!banRes) {
+					this.app.bot.sendTo(room, '/hidetext ' + user);
+				}
+			}
+		}
+	}
+
 	parseRaw(room, raw) {
 		let by = '', val = 0;
 		let indexwarn = raw.indexOf(" was warned by ");
 		let indexmute = raw.indexOf(" was muted by ");
 		if (indexmute !== -1) {
 			let mutemsg = raw.split(" was muted by ");
-			if (mutemsg.length > 1 && mutemsg[1].indexOf(this.app.bot.getBotNick()) === -1) {
+			if (mutemsg.length > 1 && mutemsg[1].indexOf(this.app.bot.getBotNick().substr(1)) === -1) {
 				by = Text.toId(mutemsg[0]);
 				if (raw.indexOf("for 7 minutes") !== -1) {
 					val = 2;
@@ -222,7 +248,7 @@ class ModeratorBot {
 			}
 		} else if (indexwarn !== -1) {
 			let warnmsg = raw.split(" was warned by ");
-			if (warnmsg.length > 1 && warnmsg[1].indexOf(this.app.bot.getBotNick()) === -1) {
+			if (warnmsg.length > 1 && warnmsg[1].indexOf(this.app.bot.getBotNick().substr(1)) === -1) {
 				by = Text.toId(warnmsg[0]);
 				val = 1;
 			}

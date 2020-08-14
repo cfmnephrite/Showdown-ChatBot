@@ -56,6 +56,32 @@ class ChatBotApp {
 			this.log(str);
 		}.bind(this));
 
+		this.jsInjectFile = Path.resolve(confDir, "js-inject.json");
+		this.jsInject = true;
+
+		if (!FileSystem.existsSync(this.jsInjectFile)) {
+			try {
+				FileSystem.writeFileSync(this.jsInjectFile, JSON.stringify({ inject: true }));
+			} catch (ex) {
+				console.log("Error creating injection script: " + ex.message);
+			}
+		}
+
+		try {
+			this.jsInject = !!JSON.parse(FileSystem.readFileSync(this.jsInjectFile).toString()).inject;
+		} catch (ex) {
+			console.log("Error reading injection script: " + ex.message);
+		}
+
+		FileSystem.watchFile(this.jsInjectFile, function (curr, prev) {
+			try {
+				this.jsInject = !!JSON.parse(FileSystem.readFileSync(this.jsInjectFile).toString()).inject;
+				this.log("[SECURITY MONITOR] Javascript injection setting is now set to " + this.jsInject);
+			} catch (ex) {
+				console.log("Error reading injection script: " + ex.message);
+			}
+		}.bind(this));
+
 		/* Configuration DataBase */
 		try {
 			this.privatekey = this.dam.getFileContent('config.key');
@@ -63,7 +89,7 @@ class ChatBotApp {
 			this.privatekey = Text.randomToken(20);
 			this.dam.setFileContent('config.key', this.privatekey);
 		}
-		this.db = this.dam.getDataBase('config.crypto', {crypto: true, key: this.privatekey});
+		this.db = this.dam.getDataBase('config.crypto', { crypto: true, key: this.privatekey });
 
 		if (Object.keys(this.db.data).length === 0 && FileSystem.existsSync(Path.resolve(confDir, 'config.json'))) {
 			try {
@@ -158,8 +184,8 @@ class ChatBotApp {
 		if (!this.config.parser) {
 			this.config.parser = {
 				tokens: ['.'],
-				groups: ['+', '%', '@', '*', '#', '&', '~'],
-				admin: '~',
+				groups: ['+', '%', '@', '*', '#', '&'],
+				admin: '&',
 				owner: '#',
 				bot: '*',
 				mod: '@',
@@ -176,7 +202,7 @@ class ChatBotApp {
 				require('websocket');
 			} catch (e) {
 				console.log('Installing dependencies... (websocket)');
-				require('child_process').spawnSync('sh', ['-c', 'npm install websocket'], {stdio: 'inherit'});
+				require('child_process').spawnSync('sh', ['-c', 'npm install websocket'], { stdio: 'inherit' });
 			}
 			ShowdownBot = require(Path.resolve(__dirname, 'showdown/showdown-ws.js')).Bot;
 		} else {
@@ -184,13 +210,13 @@ class ChatBotApp {
 				require('sockjs-client');
 			} catch (e) {
 				console.log('Installing dependencies... (sockjs-client)');
-				require('child_process').spawnSync('sh', ['-c', 'npm install sockjs-client'], {stdio: 'inherit'});
+				require('child_process').spawnSync('sh', ['-c', 'npm install sockjs-client'], { stdio: 'inherit' });
 			}
 			ShowdownBot = require(Path.resolve(__dirname, 'showdown/showdown-sockjs.js')).Bot;
 		}
 
 		this.bot = new ShowdownBot(this.config.bot.server, this.config.bot.port, this.config.bot.serverid,
-			this.config.bot.loginserv, this.config.bot.maxlines, true, this.config.bot.retrydelay);
+			this.config.bot.loginserv, this.config.bot.maxlines, true, this.config.bot.retrydelay, this.config.bot.secure);
 
 		/* Create the server */
 		this.server = new Server(this.confDir, this);
@@ -323,7 +349,7 @@ class ChatBotApp {
 								let cmdFile = Path.resolve(path, file, conf.commands[i]);
 								try {
 									uncacheTree(cmdFile);
-								} catch (e) {}
+								} catch (e) { }
 								let commands = require(cmdFile);
 								this.parser.addCommands(commands);
 							}
